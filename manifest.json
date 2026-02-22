@@ -1,0 +1,9 @@
+{
+    "display_name": "Stream Cleaner & Swipe Fix",
+    "loading_order": 100,
+    "js": "index.js",
+    "author": "灰魂×主人",
+    "version": "1.0.0",
+    "description": "流式输出段落间空行清除 + Swipe后不再跳转到页面顶部",
+    "homePage": ""
+}
