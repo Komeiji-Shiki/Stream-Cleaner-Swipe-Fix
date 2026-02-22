@@ -171,9 +171,17 @@
 
     const INDENT = '\u3000\u3000';
 
+    /**
+     * 判断文本节点是否只包含"不可见"空白。
+     * 全角空格 \u3000 视为"可见"（有意义的缩进字符），不在此列。
+     * 这样 text_segment 拆分出的纯全角空格节点不会被跳过。
+     */
+    const isInvisibleWS = (n) =>
+        n?.nodeType === Node.TEXT_NODE && /^[\u0020\u00A0\t\r\n]*$/.test(n.textContent);
+
     function findFirstTextNode(el) {
         for (const child of el.childNodes) {
-            if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() !== '') {
+            if (child.nodeType === Node.TEXT_NODE && !isInvisibleWS(child)) {
                 return child;
             }
             if (child.nodeType === Node.ELEMENT_NODE) {
@@ -187,7 +195,7 @@
 
     /** 对单个文本节点执行缩进（如果还没有的话） */
     function _applyIndent(textNode) {
-        if (!textNode || textNode.textContent.trim() === '') return;
+        if (!textNode || isInvisibleWS(textNode)) return;
         if (textNode.textContent.startsWith(INDENT)) return;
         const trimmed = textNode.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
         textNode.textContent = INDENT + trimmed;
@@ -210,8 +218,9 @@
                 if (!isBrLike(child)) continue;
 
                 // 从 br 后面找第一个有文本的兄弟节点
+                // 用 isInvisibleWS 而非 isWS，避免跳过全角空格节点
                 let sibling = child.nextSibling;
-                while (sibling && isWS(sibling)) {
+                while (sibling && isInvisibleWS(sibling)) {
                     sibling = sibling.nextSibling;
                 }
                 if (!sibling) continue;
