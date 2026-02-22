@@ -1,8 +1,9 @@
 /**
  * Stream Cleaner & Swipe Fix
  * ──────────────────────────
- * 功能1：流式输出时实时清除段落间多余空行（<br>、空<p>等）
+ * 功能1：消除段落间多余空行（流式期间用 CSS 隐藏，结束后 DOM 清理）
  * 功能2：Swipe左右切换回复后保持滚动位置，不再跳到顶部
+ * 功能3：段首自动补两个全角空格缩进（仅生成结束后执行）
  *
  * @author 灰魂×主人
  */
@@ -10,6 +11,37 @@
     'use strict';
 
     const TAG = '[StreamCleaner]';
+
+    // 目标区域选择器（正文 + 思维链）
+    const TARGET_SELECTOR = '.mes_text, .mes_reasoning';
+
+    // =====================================================================
+    //  注入 CSS：流式期间零闪烁地隐藏空行
+    // =====================================================================
+
+    const STYLE_ID = 'stream-cleaner-css';
+
+    function injectCSS() {
+        if (document.getElementById(STYLE_ID)) return;
+        const style = document.createElement('style');
+        style.id = STYLE_ID;
+
+        // 为 .mes_text 和 .mes_reasoning 生成相同的规则
+        const areas = ['#chat .mes_text', '#chat .mes_reasoning'];
+        const rules = areas.flatMap((a) => [
+            // 空段落
+            `${a} p:empty { display: none !important; }`,
+            `${a} p:has(> br:only-child) { display: none !important; }`,
+            // 连续 <br>
+            `${a} br + br { display: none !important; }`,
+            `${a} br + span.text_segment:has(> br:only-child) { display: none !important; }`,
+            `${a} span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
+        ]);
+
+        style.textContent = rules.join('\n');
+        document.head.appendChild(style);
+        console.log(TAG, '✓ CSS injected');
+    }
 
     // =====================================================================
     //  工具：DOM 判断
@@ -21,20 +53,15 @@
         'HR', 'FIGURE', 'DETAILS', 'SUMMARY', 'SECTION', 'ARTICLE',
     ]);
 
-    /** 是否为块级元素 */
     const isBlock = (n) => n?.nodeType === Node.ELEMENT_NODE && BLOCK_TAGS.has(n.tagName);
-
-    /** 是否为纯空白文本节点 */
     const isWS = (n) => n?.nodeType === Node.TEXT_NODE && /^\s*$/.test(n.textContent);
 
-    /** 是否为空段落（<p></p> / <p><br></p> / <p>&nbsp;</p>） */
     function isEmptyP(n) {
         if (n?.nodeType !== Node.ELEMENT_NODE || n.tagName !== 'P') return false;
         const h = n.innerHTML.trim();
         return h === '' || h === '<br>' || /^(\s|&nbsp;)*$/.test(h);
     }
 
-    /** 跳过空白文本，找到有意义的兄弟节点 */
     function significantSibling(node, dir) {
         const prop = dir === 'prev' ? 'previousSibling' : 'nextSibling';
         let s = node[prop];
@@ -42,75 +69,129 @@
         return s;
     }
 
+    /** 判断节点是否是 <br>（裸的或被 span 包裹的） */
+    function isBrLike(node) {
+        if (!node || node.nodeType !== Node.ELEMENT_NODE) return false;
+        if (node.tagName === 'BR') return true;
+        if (node.tagName === 'SPAN' && node.children.length === 1 &&
+            node.children[0].tagName === 'BR' && node.textContent.trim() === '') {
+            return true;
+        }
+        return false;
+    }
+
     // =====================================================================
-    //  功能 1：清除段落间空行
+    //  功能 1：DOM 清理（仅在生成结束后调用）
     // =====================================================================
 
-    /**
-     * 扫描容器的**直接子节点**，移除夹在两个块级元素之间的 <br> 和空 <p>。
-     * 返回是否有改动。
-     */
-    function cleanBlanks(container) {
+    const CONTAINER_TAGS = new Set([
+        'DIV', 'DETAILS', 'SECTION', 'ARTICLE', 'ASIDE', 'MAIN',
+        'FOOTER', 'HEADER', 'FIGURE', 'FIGCAPTION', 'SUMMARY',
+        'BLOCKQUOTE', 'NAV', 'LI',
+    ]);
+
+    /** 递归移除块级元素间的空行节点 */
+    function cleanBlockGaps(container) {
         if (!container) return false;
         let dirty = false;
 
-        // 快照后遍历，避免 live NodeList 的索引偏移
         for (const node of Array.from(container.childNodes)) {
-            const isBR = node.nodeType === Node.ELEMENT_NODE && node.tagName === 'BR';
+            const isEl = node.nodeType === Node.ELEMENT_NODE;
+            const isBR = isEl && node.tagName === 'BR';
             const isEP = isEmptyP(node);
-            if (!isBR && !isEP) continue;
 
-            const prev = significantSibling(node, 'prev');
-            const next = significantSibling(node, 'next');
+            if (isBR || isEP) {
+                const prev = significantSibling(node, 'prev');
+                const next = significantSibling(node, 'next');
 
-            // 前后都是块级（或已到边界）→ 这个空行是多余的
-            if ((prev === null || isBlock(prev)) && (next === null || isBlock(next))) {
-                node.remove();
-                dirty = true;
+                if ((prev === null || isBlock(prev)) && (next === null || isBlock(next))) {
+                    node.remove();
+                    dirty = true;
+                }
+            } else if (isEl && CONTAINER_TAGS.has(node.tagName)) {
+                if (cleanBlockGaps(node)) dirty = true;
             }
         }
         return dirty;
     }
 
-    // —— MutationObserver 相关 ——
+    /** 移除段落/列表项内部连续 <br> 中多余的那些 */
+    function cleanConsecutiveBr(container) {
+        if (!container) return;
+        // 处理 p 和 li 内部的连续 br
+        const targets = container.querySelectorAll('p, li');
+        for (const el of targets) {
+            const children = Array.from(el.childNodes);
+            let prevWasBr = false;
 
-    let chatObserver = null;
-    let pendingRAF = null;
-
-    function scheduledClean() {
-        pendingRAF = null;
-        const mesText = document.querySelector('#chat .last_mes .mes_text');
-        if (mesText) cleanBlanks(mesText);
+            for (const child of children) {
+                if (isBrLike(child)) {
+                    if (prevWasBr) {
+                        child.remove();
+                    } else {
+                        prevWasBr = true;
+                    }
+                } else if (isWS(child)) {
+                    // 跳过空白文本，不重置标记
+                } else {
+                    prevWasBr = false;
+                }
+            }
+        }
     }
 
-    function startObserving() {
-        const chat = document.getElementById('chat');
-        if (!chat || chatObserver) return;
+    // =====================================================================
+    //  功能 3：段首全角空格缩进（仅在生成结束后执行）
+    // =====================================================================
 
-        chatObserver = new MutationObserver(() => {
-            // 合并同一帧内的多次 mutation
-            if (pendingRAF) return;
-            pendingRAF = requestAnimationFrame(scheduledClean);
-        });
+    const INDENT = '\u3000\u3000';
 
-        chatObserver.observe(chat, {
-            childList: true,
-            subtree: true,
-            characterData: true,
-        });
-
-        console.log(TAG, '✓ MutationObserver → #chat');
+    function findFirstTextNode(el) {
+        for (const child of el.childNodes) {
+            if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() !== '') {
+                return child;
+            }
+            if (child.nodeType === Node.ELEMENT_NODE) {
+                if (child.tagName === 'BR') continue;
+                const found = findFirstTextNode(child);
+                if (found) return found;
+            }
+        }
+        return null;
     }
 
-    function stopObserving() {
-        if (chatObserver) {
-            chatObserver.disconnect();
-            chatObserver = null;
+    function ensureIndent(container) {
+        if (!container) return;
+        const paragraphs = container.querySelectorAll('p');
+        for (const p of paragraphs) {
+            if (isEmptyP(p)) continue;
+            if (p.closest('pre, blockquote, li, ul, ol')) continue;
+
+            const firstText = findFirstTextNode(p);
+            if (!firstText) continue;
+            if (firstText.textContent.startsWith(INDENT)) continue;
+
+            const trimmed = firstText.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
+            firstText.textContent = INDENT + trimmed;
         }
-        if (pendingRAF) {
-            cancelAnimationFrame(pendingRAF);
-            pendingRAF = null;
+    }
+
+    // =====================================================================
+    //  最终清扫：生成结束后一次性执行
+    // =====================================================================
+
+    function finalCleanup() {
+        const lastMes = document.querySelector('#chat .last_mes');
+        if (!lastMes) return;
+
+        // 对正文和思维链都执行清理
+        const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
+        for (const target of targets) {
+            cleanBlockGaps(target);
+            cleanConsecutiveBr(target);
+            ensureIndent(target);
         }
+        console.log(TAG, '✓ Final cleanup done');
     }
 
     // =====================================================================
@@ -118,7 +199,6 @@
     // =====================================================================
 
     function installSwipeFix() {
-        // capture 阶段，在酒馆自己的 handler 之前记录滚动位置
         document.addEventListener('click', (e) => {
             const btn = e.target.closest('.swipe_left, .swipe_right');
             if (!btn) return;
@@ -127,10 +207,8 @@
             if (!chat) return;
 
             const saved = chat.scrollTop;
-            if (saved <= 0) return; // 本来就在顶部，无需修复
+            if (saved <= 0) return;
 
-            // 在后续多个时间点检查并恢复——只在偏移超过阈值时才修正
-            // 这样不会干扰用户主动的滚动
             const THRESHOLD = 100;
             const checkpoints = [0, 50, 100, 200, 350, 500];
 
@@ -161,22 +239,20 @@
 
         console.log(TAG, '✓ SillyTavern API ready — 开始挂载');
 
-        // 启动观察 & Swipe 修复
-        startObserving();
+        // 注入 CSS（立即生效，零闪烁）
+        injectCSS();
+
+        // Swipe 修复
         installSwipeFix();
 
-        // 聊天切换时重新挂载观察器
-        ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
-            stopObserving();
-            setTimeout(startObserving, 300);
+        // 生成结束后做一次最终清扫
+        ctx.eventSource.on(ctx.event_types.GENERATION_ENDED, () => {
+            setTimeout(finalCleanup, 300);
         });
 
-        // 生成结束后做一次最终清扫（流式残留的最后机会）
-        ctx.eventSource.on(ctx.event_types.GENERATION_ENDED, () => {
-            setTimeout(() => {
-                const mesText = document.querySelector('#chat .last_mes .mes_text');
-                if (mesText) cleanBlanks(mesText);
-            }, 200);
+        // 聊天切换后确保 CSS 存在
+        ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
+            injectCSS();
         });
     }
 
