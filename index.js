@@ -34,10 +34,15 @@
             `${a} p:has(> br:only-child) { display: none !important; }`,
 
             // ── 顶层直接子级的连续 <br>（块级元素间的空行） ──
-            // 只对直接子 br 生效，不进入 <p> 内部
             `${a} > br + br { display: none !important; }`,
             `${a} > br + span.text_segment:has(> br:only-child) { display: none !important; }`,
             `${a} > span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
+
+            // ── <p> 内部的连续 <br>（段内空行） ──
+            // 保留第一个 br（换行），隐藏紧跟的第二个（空行）
+            `${a} p br + br { display: none !important; }`,
+            `${a} p br + span.text_segment:has(> br:only-child) { display: none !important; }`,
+            `${a} p span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
         ]);
 
         style.textContent = rules.join('\n');
@@ -123,12 +128,26 @@
     }
 
     /**
-     * 移除容器**直接子级**的连续 <br>（顶层空行）。
-     * 不进入 <p> 内部——<p> 内部的连续 <br> 是段落分隔符，不能删。
+     * 移除连续 <br> 中多余的那些（保留第一个作为换行，删掉后续的空行）。
+     * 对容器自身的子节点 + 所有 <p>/<li> 内部都执行。
+     * 递归进入容器类子元素。
      */
-    function cleanTopLevelConsecutiveBr(container) {
+    function cleanConsecutiveBr(container) {
         if (!container) return;
-        const children = Array.from(container.childNodes);
+
+        // 处理容器自身的直接子节点
+        _stripConsecutiveBr(container);
+
+        // 处理 <p> 和 <li> 内部的连续 br
+        const inners = container.querySelectorAll('p, li');
+        for (const el of inners) {
+            _stripConsecutiveBr(el);
+        }
+    }
+
+    /** 在给定元素的直接子节点中，保留第一个 br，删掉连续后续的 */
+    function _stripConsecutiveBr(el) {
+        const children = Array.from(el.childNodes);
         let prevWasBr = false;
 
         for (const child of children) {
@@ -139,16 +158,9 @@
                     prevWasBr = true;
                 }
             } else if (isWS(child)) {
-                // 空白文本不重置
+                // 空白文本不重置标记
             } else {
                 prevWasBr = false;
-            }
-        }
-
-        // 递归进入容器子元素（但不进入 P）
-        for (const child of container.children) {
-            if (CONTAINER_TAGS.has(child.tagName)) {
-                cleanTopLevelConsecutiveBr(child);
             }
         }
     }
@@ -200,7 +212,7 @@
         const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
         for (const target of targets) {
             cleanBlockGaps(target);
-            cleanTopLevelConsecutiveBr(target);
+            cleanConsecutiveBr(target);
             ensureIndent(target);
         }
         console.log(TAG, '✓ Final cleanup done');
