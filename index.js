@@ -185,6 +185,14 @@
         return null;
     }
 
+    /** 对单个文本节点执行缩进（如果还没有的话） */
+    function _applyIndent(textNode) {
+        if (!textNode || textNode.textContent.trim() === '') return;
+        if (textNode.textContent.startsWith(INDENT)) return;
+        const trimmed = textNode.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
+        textNode.textContent = INDENT + trimmed;
+    }
+
     function ensureIndent(container) {
         if (!container) return;
         const paragraphs = container.querySelectorAll('p');
@@ -192,12 +200,27 @@
             if (isEmptyP(p)) continue;
             if (p.closest('pre, blockquote, li, ul, ol')) continue;
 
+            // 1. 段首缩进
             const firstText = findFirstTextNode(p);
-            if (!firstText) continue;
-            if (firstText.textContent.startsWith(INDENT)) continue;
+            _applyIndent(firstText);
 
-            const trimmed = firstText.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
-            firstText.textContent = INDENT + trimmed;
+            // 2. <p> 内部每个 <br> 后面的"逻辑段落"也要缩进
+            //    （正文可能是一个大 <p> 内用 <br> 分段）
+            for (const child of Array.from(p.childNodes)) {
+                if (!isBrLike(child)) continue;
+
+                // 从 br 后面找第一个有文本的兄弟节点
+                let sibling = child.nextSibling;
+                while (sibling && isWS(sibling)) {
+                    sibling = sibling.nextSibling;
+                }
+                if (!sibling) continue;
+
+                const textNode = (sibling.nodeType === Node.TEXT_NODE)
+                    ? sibling
+                    : findFirstTextNode(sibling);
+                _applyIndent(textNode);
+            }
         }
     }
 
