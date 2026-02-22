@@ -29,13 +29,15 @@
         // 为 .mes_text 和 .mes_reasoning 生成相同的规则
         const areas = ['#chat .mes_text', '#chat .mes_reasoning'];
         const rules = areas.flatMap((a) => [
-            // 空段落
+            // ── 空段落（任意嵌套深度） ──
             `${a} p:empty { display: none !important; }`,
             `${a} p:has(> br:only-child) { display: none !important; }`,
-            // 连续 <br>
-            `${a} br + br { display: none !important; }`,
-            `${a} br + span.text_segment:has(> br:only-child) { display: none !important; }`,
-            `${a} span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
+
+            // ── 顶层直接子级的连续 <br>（块级元素间的空行） ──
+            // 只对直接子 br 生效，不进入 <p> 内部
+            `${a} > br + br { display: none !important; }`,
+            `${a} > br + span.text_segment:has(> br:only-child) { display: none !important; }`,
+            `${a} > span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
         ]);
 
         style.textContent = rules.join('\n');
@@ -90,7 +92,11 @@
         'BLOCKQUOTE', 'NAV', 'LI',
     ]);
 
-    /** 递归移除块级元素间的空行节点 */
+    /**
+     * 递归移除块级元素间的空行节点（<br> 和空 <p>）。
+     * 只处理容器的直接子节点层级，不进入 <p> 内部。
+     * <p> 内部的 <br> 是有意义的段落内换行，不能删。
+     */
     function cleanBlockGaps(container) {
         if (!container) return false;
         let dirty = false;
@@ -109,33 +115,40 @@
                     dirty = true;
                 }
             } else if (isEl && CONTAINER_TAGS.has(node.tagName)) {
+                // 递归进入容器（但不进入 P、PRE 等内容元素）
                 if (cleanBlockGaps(node)) dirty = true;
             }
         }
         return dirty;
     }
 
-    /** 移除段落/列表项内部连续 <br> 中多余的那些 */
-    function cleanConsecutiveBr(container) {
+    /**
+     * 移除容器**直接子级**的连续 <br>（顶层空行）。
+     * 不进入 <p> 内部——<p> 内部的连续 <br> 是段落分隔符，不能删。
+     */
+    function cleanTopLevelConsecutiveBr(container) {
         if (!container) return;
-        // 处理 p 和 li 内部的连续 br
-        const targets = container.querySelectorAll('p, li');
-        for (const el of targets) {
-            const children = Array.from(el.childNodes);
-            let prevWasBr = false;
+        const children = Array.from(container.childNodes);
+        let prevWasBr = false;
 
-            for (const child of children) {
-                if (isBrLike(child)) {
-                    if (prevWasBr) {
-                        child.remove();
-                    } else {
-                        prevWasBr = true;
-                    }
-                } else if (isWS(child)) {
-                    // 跳过空白文本，不重置标记
+        for (const child of children) {
+            if (isBrLike(child)) {
+                if (prevWasBr) {
+                    child.remove();
                 } else {
-                    prevWasBr = false;
+                    prevWasBr = true;
                 }
+            } else if (isWS(child)) {
+                // 空白文本不重置
+            } else {
+                prevWasBr = false;
+            }
+        }
+
+        // 递归进入容器子元素（但不进入 P）
+        for (const child of container.children) {
+            if (CONTAINER_TAGS.has(child.tagName)) {
+                cleanTopLevelConsecutiveBr(child);
             }
         }
     }
@@ -184,11 +197,10 @@
         const lastMes = document.querySelector('#chat .last_mes');
         if (!lastMes) return;
 
-        // 对正文和思维链都执行清理
         const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
         for (const target of targets) {
             cleanBlockGaps(target);
-            cleanConsecutiveBr(target);
+            cleanTopLevelConsecutiveBr(target);
             ensureIndent(target);
         }
         console.log(TAG, '✓ Final cleanup done');
@@ -239,24 +251,18 @@
 
         console.log(TAG, '✓ SillyTavern API ready — 开始挂载');
 
-        // 注入 CSS（立即生效，零闪烁）
         injectCSS();
-
-        // Swipe 修复
         installSwipeFix();
 
-        // 生成结束后做一次最终清扫
         ctx.eventSource.on(ctx.event_types.GENERATION_ENDED, () => {
             setTimeout(finalCleanup, 300);
         });
 
-        // 聊天切换后确保 CSS 存在
         ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
             injectCSS();
         });
     }
 
-    // 入口
     if (document.readyState === 'complete') {
         setTimeout(init, 2000);
     } else {
