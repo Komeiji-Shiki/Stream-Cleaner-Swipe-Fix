@@ -38,9 +38,9 @@
             `${a} > br + span.text_segment:has(> br:only-child) { display: none !important; }`,
             `${a} > span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
 
-            // ── <p> 内部的连续 <br>（段内空行） ──
-            // 保留第一个 br（换行），隐藏紧跟的第二个（空行）
-            `${a} p br + br { display: none !important; }`,
+            // ── <p> 内部的空行（span 包裹的连续 br） ──
+            // 注意：p br + br 不能用！CSS + 会跳过文本节点导致误匹配正常换行
+            // 但 span:has(> br:only-child) 可以精准识别"只含 br 的流式 span"
             `${a} p br + span.text_segment:has(> br:only-child) { display: none !important; }`,
             `${a} p span.text_segment:has(> br:only-child) + span.text_segment:has(> br:only-child) { display: none !important; }`,
         ]);
@@ -171,17 +171,9 @@
 
     const INDENT = '\u3000\u3000';
 
-    /**
-     * 判断文本节点是否只包含"不可见"空白。
-     * 全角空格 \u3000 视为"可见"（有意义的缩进字符），不在此列。
-     * 这样 text_segment 拆分出的纯全角空格节点不会被跳过。
-     */
-    const isInvisibleWS = (n) =>
-        n?.nodeType === Node.TEXT_NODE && /^[\u0020\u00A0\t\r\n]*$/.test(n.textContent);
-
     function findFirstTextNode(el) {
         for (const child of el.childNodes) {
-            if (child.nodeType === Node.TEXT_NODE && !isInvisibleWS(child)) {
+            if (child.nodeType === Node.TEXT_NODE && child.textContent.trim() !== '') {
                 return child;
             }
             if (child.nodeType === Node.ELEMENT_NODE) {
@@ -193,14 +185,6 @@
         return null;
     }
 
-    /** 对单个文本节点执行缩进（如果还没有的话） */
-    function _applyIndent(textNode) {
-        if (!textNode || isInvisibleWS(textNode)) return;
-        if (textNode.textContent.startsWith(INDENT)) return;
-        const trimmed = textNode.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
-        textNode.textContent = INDENT + trimmed;
-    }
-
     function ensureIndent(container) {
         if (!container) return;
         const paragraphs = container.querySelectorAll('p');
@@ -208,28 +192,12 @@
             if (isEmptyP(p)) continue;
             if (p.closest('pre, blockquote, li, ul, ol')) continue;
 
-            // 1. 段首缩进
             const firstText = findFirstTextNode(p);
-            _applyIndent(firstText);
+            if (!firstText) continue;
+            if (firstText.textContent.startsWith(INDENT)) continue;
 
-            // 2. <p> 内部每个 <br> 后面的"逻辑段落"也要缩进
-            //    （正文可能是一个大 <p> 内用 <br> 分段）
-            for (const child of Array.from(p.childNodes)) {
-                if (!isBrLike(child)) continue;
-
-                // 从 br 后面找第一个有文本的兄弟节点
-                // 用 isInvisibleWS 而非 isWS，避免跳过全角空格节点
-                let sibling = child.nextSibling;
-                while (sibling && isInvisibleWS(sibling)) {
-                    sibling = sibling.nextSibling;
-                }
-                if (!sibling) continue;
-
-                const textNode = (sibling.nodeType === Node.TEXT_NODE)
-                    ? sibling
-                    : findFirstTextNode(sibling);
-                _applyIndent(textNode);
-            }
+            const trimmed = firstText.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
+            firstText.textContent = INDENT + trimmed;
         }
     }
 
