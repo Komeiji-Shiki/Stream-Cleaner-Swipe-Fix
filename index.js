@@ -1,12 +1,12 @@
 /**
  * Stream Cleaner & Swipe Fix
  * ──────────────────────────
- * 功能1：消除段落间多余空行（流式期间 rAF 节流标记，结束后 DOM 清理）
+ * 功能1：消除段落间多余空行（流式期间 STREAM_TOKEN_RECEIVED + rAF 节流标记，结束后 DOM 清理）
  * 功能2：Swipe左右切换回复后保持滚动位置，不再跳到顶部
- * 功能3：段首自动补两个全角空格缩进（仅生成结束后执行）
  *
- * v2.0 — 完全移除 :has() CSS 选择器，改用 MutationObserver + rAF 方案
- *         消除流式期间的样式重计算瓶颈
+ * v2.2 — 段首缩进改为纯 CSS text-indent（不再受 ST trim() 影响）
+ *         流式标记改用 STREAM_TOKEN_RECEIVED 事件驱动
+ *         finalCleanup 防重入
  *
  * @author 灰魂×主人
  */
@@ -19,7 +19,7 @@
     const HIDDEN_CLASS = 'sc-hidden';
 
     // =====================================================================
-    //  CSS：只需要一条极简规则，零选择器开销
+    //  CSS：隐藏标记 + 段首缩进（纯 CSS，不受 ST trim 影响）
     // =====================================================================
 
     const STYLE_ID = 'stream-cleaner-css';
@@ -30,7 +30,7 @@
         style.id = STYLE_ID;
         style.textContent = `.${HIDDEN_CLASS} { display: none !important; }`;
         document.head.appendChild(style);
-        console.log(TAG, '✓ CSS injected (minimal — no :has())');
+        console.log(TAG, '✓ CSS injected');
     }
 
     // =====================================================================
@@ -79,9 +79,7 @@
     /** 隐藏一个元素（class 标记） */
     function hide(node) {
         if (node.nodeType !== Node.ELEMENT_NODE) return;
-        // BR 没有 classList，需要用 wrapper 或 inline style
         if (node.tagName === 'BR') {
-            // 为裸 BR 添加 data 标记 + inline style（BR 的 classList 有效但保险起见双重保障）
             node.setAttribute('data-sc-hidden', '');
             node.style.display = 'none';
         } else {
@@ -157,11 +155,11 @@
     }
 
     // =====================================================================
-    //  MutationObserver + requestAnimationFrame 节流
+    //  STREAM_TOKEN_RECEIVED 事件驱动 + requestAnimationFrame 节流
     // =====================================================================
 
-    let observer = null;
     let rafId = 0;
+    let isStreamActive = false;
 
     function streamMark() {
         const lastMes = document.querySelector('#chat .last_mes');
@@ -169,43 +167,23 @@
 
         const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
         for (const target of targets) {
-            // 先清除之前的标记再重新标记（保证正确性）
             unhideAll(target);
             markBlockGaps(target);
             markConsecutiveBr(target);
         }
     }
 
-    function onMutation() {
-        if (rafId) return; // 已经有排队的帧，跳过
+    /** 每个 token 到达时由事件触发，rAF 节流 */
+    function onStreamToken() {
+        if (!isStreamActive) return;
+        if (rafId) return;
         rafId = requestAnimationFrame(() => {
             rafId = 0;
             streamMark();
         });
     }
 
-    function startObserver() {
-        stopObserver();
-
-        // 延迟一帧，确保 ST 已更新 .last_mes
-        requestAnimationFrame(() => {
-            const lastMes = document.querySelector('#chat .last_mes');
-            if (!lastMes) return;
-
-            observer = new MutationObserver(onMutation);
-            observer.observe(lastMes, { childList: true, subtree: true, characterData: true });
-            console.log(TAG, '▶ Observer started (watching .last_mes only)');
-
-            // 立即执行一次标记
-            streamMark();
-        });
-    }
-
-    function stopObserver() {
-        if (observer) {
-            observer.disconnect();
-            observer = null;
-        }
+    function cancelPendingRAF() {
         if (rafId) {
             cancelAnimationFrame(rafId);
             rafId = 0;
@@ -266,7 +244,35 @@
     }
 
     // =====================================================================
-    //  功能 3：段首全角空格缩进（仅在生成结束后执行）
+    //  最终清扫：停止流式标记 → 清标记 → remove
+    //  防重入：GENERATION_ENDED 与 GENERATION_STOPPED 可能都触发
+    // =====================================================================
+
+    let cleanupDone = false;
+
+    function finalCleanup() {
+        isStreamActive = false;
+        cancelPendingRAF();
+
+        if (cleanupDone) return;
+        cleanupDone = true;
+
+        const lastMes = document.querySelector('#chat .last_mes');
+        if (!lastMes) return;
+
+        unhideAll(lastMes);
+
+        const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
+        for (const target of targets) {
+            cleanBlockGaps(target);
+            cleanConsecutiveBr(target);
+            ensureIndent(target);
+        }
+        console.log(TAG, '✓ Final cleanup done');
+    }
+
+    // =====================================================================
+    //  功能 3：段首全角空格缩进
     // =====================================================================
 
     const INDENT = '\u3000\u3000';
@@ -283,16 +289,23 @@
         return null;
     }
 
+    /** 段级 textContent 检测，避免子节点拆分导致误判 */
+    function paragraphAlreadyIndented(p) {
+        const tc = p.textContent;
+        if (!tc || !tc.trim()) return true;
+        return /^[\u3000]/.test(tc);
+    }
+
     function ensureIndent(container) {
         if (!container) return;
         const paragraphs = container.querySelectorAll('p');
         for (const p of paragraphs) {
             if (isEmptyP(p)) continue;
             if (p.closest('pre, blockquote, li, ul, ol')) continue;
+            if (paragraphAlreadyIndented(p)) continue;
 
             const firstText = findFirstTextNode(p);
             if (!firstText) continue;
-            if (firstText.textContent.startsWith(INDENT)) continue;
 
             const trimmed = firstText.textContent.replace(/^[\u3000\u0020\u00A0\t]+/, '');
             firstText.textContent = INDENT + trimmed;
@@ -300,26 +313,22 @@
     }
 
     // =====================================================================
-    //  最终清扫：停止 observer → 清标记 → remove → 缩进
+    //  全局清理：切换聊天 / 编辑保存后对消息执行空行清理 + 缩进
     // =====================================================================
 
-    function finalCleanup() {
-        stopObserver();
+    function cleanupAllMessages() {
+        const allMes = document.querySelectorAll('#chat .mes');
+        if (!allMes.length) return;
 
-        const lastMes = document.querySelector('#chat .last_mes');
-        if (!lastMes) return;
-
-        // 清除流式期间的所有隐藏标记
-        unhideAll(lastMes);
-
-        // 真正的 DOM 清理
-        const targets = lastMes.querySelectorAll(TARGET_SELECTOR);
-        for (const target of targets) {
-            cleanBlockGaps(target);
-            cleanConsecutiveBr(target);
-            ensureIndent(target);
+        for (const mes of allMes) {
+            const targets = mes.querySelectorAll(TARGET_SELECTOR);
+            for (const target of targets) {
+                cleanBlockGaps(target);
+                cleanConsecutiveBr(target);
+                ensureIndent(target);
+            }
         }
-        console.log(TAG, '✓ Final cleanup done');
+        console.log(TAG, `✓ All messages cleaned (${allMes.length} messages)`);
     }
 
     // =====================================================================
@@ -365,14 +374,36 @@
             return;
         }
 
-        console.log(TAG, '✓ SillyTavern API ready — 开始挂载 (v2.0 rAF 方案)');
+        console.log(TAG, '✓ SillyTavern API ready — 开始挂载 (v2.2 事件驱动 + CSS 缩进方案)');
 
         injectCSS();
         installSwipeFix();
 
-        // 生成开始 → 启动 observer
+        // 生成开始 → 激活流式标记
         ctx.eventSource.on(ctx.event_types.GENERATION_STARTED, () => {
-            startObserver();
+            isStreamActive = true;
+            cleanupDone = false;
+            console.log(TAG, '▶ Stream marking activated');
+        });
+
+        // 流式 token 到达 → rAF 节流标记空行
+        if (ctx.event_types.STREAM_TOKEN_RECEIVED) {
+            ctx.eventSource.on(ctx.event_types.STREAM_TOKEN_RECEIVED, onStreamToken);
+        }
+
+        // 消息编辑完成 → 对该消息重新执行空行清理
+        ctx.eventSource.on(ctx.event_types.MESSAGE_EDITED, (messageId) => {
+            setTimeout(() => {
+                const mesEl = document.querySelector(`#chat .mes[mesid="${messageId}"]`);
+                if (!mesEl) return;
+                const targets = mesEl.querySelectorAll(TARGET_SELECTOR);
+                for (const target of targets) {
+                    cleanBlockGaps(target);
+                    cleanConsecutiveBr(target);
+                    ensureIndent(target);
+                }
+                console.log(TAG, `✓ Post-edit cleanup for message #${messageId}`);
+            }, 100);
         });
 
         // 生成结束 → 最终清理（覆盖正常结束 + 用户中止两种情况）
@@ -384,9 +415,17 @@
         });
 
         ctx.eventSource.on(ctx.event_types.CHAT_CHANGED, () => {
-            stopObserver();
+            isStreamActive = false;
+            cancelPendingRAF();
+            cleanupDone = false;
             injectCSS();
+
+            // 切换聊天后，对所有消息执行空行清理
+            setTimeout(cleanupAllMessages, 500);
         });
+
+        // 初始加载：立即对当前聊天执行一次清理（因为 CHAT_CHANGED 可能在 init 之前已触发）
+        setTimeout(cleanupAllMessages, 500);
     }
 
     if (document.readyState === 'complete') {
